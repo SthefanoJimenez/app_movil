@@ -5,6 +5,14 @@ import io
 from scipy.signal import convolve2d
 from skimage.feature import hog
 
+# ---- Normalizar Embedding ----
+def normalizar_embedding(emb):
+    emb = np.array(emb)
+    norm = np.linalg.norm(emb)
+    if norm == 0:
+        return emb
+    return emb / norm
+
 # --------- LPQ Manual ----------
 def lpq_descriptor(image, win_size=7):
     rho = 0.90
@@ -40,24 +48,6 @@ def lpq_descriptor(image, win_size=7):
     hist /= (hist.sum() + 1e-6)
     return hist
 
-# --------- SIFT Descriptor ----------
-def sift_descriptor(image_np, max_features=64):
-    try:
-        sift = cv2.SIFT_create(nfeatures=max_features)
-        keypoints, descriptors = sift.detectAndCompute(image_np, None)
-        if descriptors is None:
-            # Si no hay keypoints, devolvemos ceros
-            return np.zeros((max_features * 128,), dtype=np.float32)
-        desc = descriptors.flatten()
-        if len(desc) < max_features * 128:
-            desc = np.pad(desc, (0, max_features * 128 - len(desc)), 'constant')
-        else:
-            desc = desc[:max_features * 128]
-        return desc.astype(np.float32)
-    except Exception as e:
-        print("Error SIFT:", e)
-        return np.zeros((max_features * 128,), dtype=np.float32)
-
 # --------- HOG Descriptor ----------
 def hog_descriptor(image_np):
     image_np = image_np.astype('float32') / 255.0
@@ -67,14 +57,16 @@ def hog_descriptor(image_np):
 
 # --------- Simple Data Augmentation ----------
 def augmentations(image_np):
-    # Devuelve la imagen original y una volteada horizontal (puedes agregar más)
+    # Devuelve la imagen original y una volteada horizontal
     return [image_np, cv2.flip(image_np, 1)]
 
-# --------- Embeddings Fusionados LBP + LPQ + SIFT + HOG + Augmentation ----------
-def obtener_embeddings_lbp_lpq_sift_hog(imagen_bytes):
+# --------- Embeddings Fusionados LBP + LPQ + HOG + Augmentation ----------
+def obtener_embeddings_lbp_lpq_hog(imagen_bytes):
     try:
         imagen = Image.open(io.BytesIO(imagen_bytes)).convert('L')
         imagen_np = np.array(imagen)
+
+        # Redimensionar y ecualizar
         imagen_np = cv2.resize(imagen_np, (128, 128))
         imagen_np = cv2.equalizeHist(imagen_np)
 
@@ -82,7 +74,7 @@ def obtener_embeddings_lbp_lpq_sift_hog(imagen_bytes):
         embeddings_list = []
 
         for variante in variantes:
-            # --- LBP ---
+            # --- LBP manual ---
             lbp = np.zeros_like(variante)
             for i in range(1, variante.shape[0] - 1):
                 for j in range(1, variante.shape[1] - 1):
@@ -104,21 +96,19 @@ def obtener_embeddings_lbp_lpq_sift_hog(imagen_bytes):
             # --- LPQ ---
             hist_lpq = lpq_descriptor(variante, win_size=7)
 
-            # --- SIFT ---
-            sift_vec = sift_descriptor(variante)
-
             # --- HOG ---
             hog_vec = hog_descriptor(variante)
+            hog_vec = hog_vec / (np.linalg.norm(hog_vec) + 1e-6)  # normaliza HOG
 
-            # --- Fusionar ---
-            fusion = np.concatenate([hist_lbp, hist_lpq, sift_vec, hog_vec])
+            # --- Fusionar LBP + LPQ + HOG ---
+            fusion = np.concatenate([hist_lbp, hist_lpq, hog_vec])
             embeddings_list.append(fusion)
 
-        # Promedio de las variantes
         embeddings_final = np.mean(np.stack(embeddings_list), axis=0)
+        embeddings_final = normalizar_embedding(embeddings_final)
         return embeddings_final.tolist()
     except Exception as e:
-        print("Error LBP+LPQ+SIFT+HOG:", e)
+        print("Error LBP+LPQ+HOG:", e)
         import traceback; traceback.print_exc()
         return None
 

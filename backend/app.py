@@ -1,9 +1,19 @@
 import numpy as np
 
+from utils.face_utils import (
+    obtener_embeddings_lbp_lpq_hog as obtener_embeddings,
+    normalizar_embedding
+)
+
 def similitud_coseno(v1, v2):
-    v1 = np.array(v1)
-    v2 = np.array(v2)
-    return float(np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2)))
+    v1 = normalizar_embedding(v1)
+    v2 = normalizar_embedding(v2)
+    return float(np.dot(v1, v2))
+
+def distancia_euclidiana(v1, v2):
+    v1 = normalizar_embedding(v1)
+    v2 = normalizar_embedding(v2)
+    return float(np.linalg.norm(np.array(v1) - np.array(v2)))
 
 import os
 import json
@@ -12,7 +22,6 @@ from flask_mysqldb import MySQL
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 from config import db_config
-from utils.face_utils import obtener_embeddings_lbp_lpq_sift_hog as obtener_embeddings
 
 # Crear la app Flask
 app = Flask(__name__)
@@ -154,12 +163,12 @@ def reconocer_usuario():
             JOIN usuarios u ON i.usuario_id = u.id
         """)
         resultados = cursor.fetchall()
-
         cursor.close()
 
-        # Almacenar similitudes agrupadas por usuario
-        umbral_similitud = 0.975
-        cantidad_minima = 2  # Requiere al menos 2 coincidencias por usuario
+        # Umbrales (ajústalos según tus experimentos)
+        umbral_similitud = 0.85    # similitud coseno, mayor o igual
+        umbral_euclidiana = 0.50   # distancia euclidiana, menor o igual
+        cantidad_minima = 4
 
         candidatos = {}
 
@@ -173,11 +182,13 @@ def reconocer_usuario():
             requisitoriado = fila[6]
 
             if len(emb_guardado) != len(emb_ext):
-                continue  # Saltar si hay conflicto de tamaño
+                continue
 
-            similitud = similitud_coseno(emb_ext, emb_guardado)
+            sim_cos = similitud_coseno(emb_ext, emb_guardado)
+            dist_euc = distancia_euclidiana(emb_ext, emb_guardado)
 
-            if similitud >= umbral_similitud:
+            # Puedes requerir ambas condiciones, o solo una, o guardar ambas para análisis
+            if sim_cos >= umbral_similitud and dist_euc <= umbral_euclidiana:
                 if usuario_id not in candidatos:
                     candidatos[usuario_id] = {
                         "nombre": nombre,
@@ -185,9 +196,11 @@ def reconocer_usuario():
                         "codigo_unico": codigo,
                         "requisitoriado": bool(requisitoriado),
                         "similitudes": [],
+                        "distancias": [],
                         "imagenes": []
                     }
-                candidatos[usuario_id]["similitudes"].append(similitud)
+                candidatos[usuario_id]["similitudes"].append(sim_cos)
+                candidatos[usuario_id]["distancias"].append(dist_euc)
                 candidatos[usuario_id]["imagenes"].append(imagen_path)
 
         # Buscar usuario con más coincidencias válidas
@@ -196,7 +209,8 @@ def reconocer_usuario():
 
         for uid, data in candidatos.items():
             if len(data["similitudes"]) >= cantidad_minima:
-                promedio = sum(data["similitudes"]) / len(data["similitudes"])
+                promedio_sim = sum(data["similitudes"]) / len(data["similitudes"])
+                promedio_dist = sum(data["distancias"]) / len(data["distancias"])
                 if len(data["similitudes"]) > max_similitudes:
                     max_similitudes = len(data["similitudes"])
                     mejor_usuario = {
@@ -204,7 +218,8 @@ def reconocer_usuario():
                         "nombre": data["nombre"],
                         "apellido": data["apellido"],
                         "codigo_unico": data["codigo_unico"],
-                        "similitud_promedio": round(promedio, 4),
+                        "similitud_promedio": round(promedio_sim, 4),
+                        "distancia_promedio": round(promedio_dist, 4),
                         "requisitoriado": data["requisitoriado"],
                         "imagen_referencia": data["imagenes"][0]
                     }
