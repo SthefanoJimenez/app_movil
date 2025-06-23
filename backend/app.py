@@ -17,11 +17,15 @@ def distancia_euclidiana(v1, v2):
 
 import os
 import json
+import json
 from flask import Flask, request, jsonify
 from flask_mysqldb import MySQL
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 from config import db_config
+import face_recognition
+import io
+
 
 # Crear la app Flask
 app = Flask(__name__)
@@ -36,21 +40,31 @@ app.config['MYSQL_DB'] = db_config['database']
 # Inicializar conexión MySQL
 mysql = MySQL(app)
 
+
 # Ruta raíz de prueba
 @app.route("/")
 def index():
     return "Backend funcionando correctamente."
 
+
 # Ruta: Registrar usuario (sin imagen aún)
 @app.route("/registrar_usuario", methods=["POST"])
 def registrar_usuario():
     try:
-        nombre         = request.form['nombre']
-        apellido       = request.form['apellido']
-        codigo_unico   = request.form['codigo_unico']
-        email          = request.form['email']
-        requisitoriado = request.form['requisitoriado'] == 'true'
+        # Obtener los datos del formulario
+        nombre = request.form['nombre']
+        apellido = request.form['apellido']
+        codigo_unico = request.form['codigo_unico']
+        email = request.form['email']
+        requisitoriado = request.form['requisitoriado'] == 'true'  # Convertir a booleano
 
+        # Verificar que los valores se recibieron correctamente
+        print(f"Datos recibidos: {nombre}, {apellido}, {codigo_unico}, {email}, {requisitoriado}")
+
+        # Verificar si todos los campos están presentes
+        if not nombre or not apellido or not codigo_unico or not email:
+            return jsonify({"mensaje": "Todos los campos son obligatorios"}), 400
+        
         cursor = mysql.connection.cursor()
         sql = """
             INSERT INTO usuarios (nombre, apellido, codigo_unico, email, requisitoriado)
@@ -61,13 +75,14 @@ def registrar_usuario():
 
         # Obtener ID generado
         inserted_id = cursor.lastrowid
-        print(f"Usuario registrado con ID: {inserted_id}")  # sale en la consola
+        print(f"Usuario registrado con ID: {inserted_id}")
 
         cursor.close()
 
-        # Devolver sólo el mensaje con el ID incluido
+        # Devolver el ID generado al frontend
         return jsonify({
-            "mensaje": f"Usuario registrado exitosamente con ID {inserted_id}"
+            "mensaje": f"Usuario registrado exitosamente con ID {inserted_id}",
+            "id_usuario": inserted_id
         }), 200
 
     except Exception as e:
@@ -75,44 +90,66 @@ def registrar_usuario():
         return jsonify({"mensaje": "Error al registrar usuario"}), 500
 
 
-# Ruta: Agregar imagen + embeddings LBP + LPQ a un usuario
+
+# Ruta: Agregar imagen + embeddings LBP + LPQ + face_recognition a un usuario
 @app.route("/agregar_imagen/<int:usuario_id>", methods=["POST"])
 def agregar_imagen(usuario_id):
     try:
         imagen = request.files['imagen']
-        filename = secure_filename(imagen.filename)
+        if not imagen:
+            raise ValueError('No se recibió ninguna imagen.')
 
-        # 📂 Crear carpeta del usuario si no existe
+        filename = secure_filename(imagen.filename)
+        print(f"Imagen recibida: {filename}")
+
+        # Crear carpeta del usuario si no existe
         carpeta_usuario = os.path.join("uploads", f"user_{usuario_id}")
         os.makedirs(carpeta_usuario, exist_ok=True)
 
-        # 🖼️ Guardar imagen dentro de la carpeta del usuario
+        # Guardar la imagen en la carpeta correspondiente
         ruta_guardado = os.path.join(carpeta_usuario, filename)
         imagen.save(ruta_guardado)
 
         with open(ruta_guardado, 'rb') as f:
             imagen_bytes = f.read()
 
+        # Embedding tradicional (LBP+LPQ+HOG)
         embeddings = obtener_embeddings(imagen_bytes)
         if embeddings is None:
-            return jsonify({"mensaje": "No se detectaron características LBP+LPQ+HOG+SIFT"}), 400
+            return jsonify({"mensaje": "No se detectaron características LBP+LPQ+HOG"}), 400
 
-        # Guardar solo la ruta relativa a la carpeta del usuario
-        ruta_relativa = os.path.join(f"user_{usuario_id}", filename)
+        # Embedding de face_recognition
+        try:
+            image_fr = face_recognition.load_image_file(io.BytesIO(imagen_bytes))
+            encodings_fr = face_recognition.face_encodings(image_fr)
+            if len(encodings_fr) > 0:
+                embedding_fr = encodings_fr[0].tolist()  # Lista serializable en JSON
+            else:
+                embedding_fr = None
+        except Exception as e:
+            print("Error obteniendo embedding face_recognition:", e)
+            embedding_fr = None
 
-        # 💾 Guardar ruta + embeddings en la base de datos
+        # Guardar ruta + embeddings en la base de datos
         cursor = mysql.connection.cursor()
-        sql = """INSERT INTO imagenes (usuario_id, imagen_path, embeddings)
-                 VALUES (%s, %s, %s)"""
-        cursor.execute(sql, (usuario_id, ruta_relativa, json.dumps(embeddings)))
+        sql = """INSERT INTO imagenes (usuario_id, imagen_path, embeddings, embedding_fr)
+                 VALUES (%s, %s, %s, %s)"""
+        cursor.execute(sql, (
+            usuario_id,
+            ruta_guardado,
+            json.dumps(embeddings),
+            json.dumps(embedding_fr) if embedding_fr is not None else None
+        ))
         mysql.connection.commit()
         cursor.close()
 
         return jsonify({"mensaje": "Imagen agregada exitosamente"}), 200
 
     except Exception as e:
-        print("Error al agregar imagen:", e)
+        print(f"Error al agregar imagen: {e}")
         return jsonify({"mensaje": "Error al agregar imagen"}), 500
+
+
 
 # Ruta: Listar todos los usuarios registrados
 @app.route("/listar_usuarios", methods=["GET"])
@@ -147,81 +184,185 @@ def reconocer_usuario():
         ruta_temporal = os.path.join("uploads", filename)
         imagen.save(ruta_temporal)
 
-        # Extraer características
         with open(ruta_temporal, 'rb') as f:
             imagen_bytes = f.read()
+
+        # --- 1. Obtener embeddings tradicionales (tu método) ---
         emb_ext = obtener_embeddings(imagen_bytes)
-
         if emb_ext is None:
-            return jsonify({"mensaje": "No se detectaron características en la imagen"}), 400
+            # Limpieza de archivo temporal
+            if os.path.exists(ruta_temporal):
+                os.remove(ruta_temporal)
+            return jsonify({"mensaje": "No se detectaron características tradicionales en la imagen"}), 400
 
-        # Obtener embeddings de la base
+        # --- 2. Obtener embedding face_recognition ---
+        try:
+            image_fr = face_recognition.load_image_file(io.BytesIO(imagen_bytes))
+            encodings_fr = face_recognition.face_encodings(image_fr)
+            if len(encodings_fr) > 0:
+                emb_ext_fr = encodings_fr[0]
+            else:
+                emb_ext_fr = None
+        except Exception as e:
+            print("Error obteniendo embedding face_recognition:", e)
+            emb_ext_fr = None
+
+        if emb_ext_fr is None:
+            if os.path.exists(ruta_temporal):
+                os.remove(ruta_temporal)
+            return jsonify({"mensaje": "No se detectó embedding face_recognition en la imagen"}), 400
+
+        # --- 3. Buscar en la base de datos ---
         cursor = mysql.connection.cursor()
         cursor.execute("""
-            SELECT i.embeddings, i.imagen_path, u.id, u.nombre, u.apellido, u.codigo_unico, u.requisitoriado
+            SELECT i.embeddings, i.embedding_fr, i.imagen_path, u.id, u.nombre, u.apellido, u.codigo_unico, u.requisitoriado
             FROM imagenes i
             JOIN usuarios u ON i.usuario_id = u.id
         """)
         resultados = cursor.fetchall()
         cursor.close()
 
-        # Umbrales (ajústalos según tus experimentos)
-        umbral_similitud = 0.85    # similitud coseno, mayor o igual
-        umbral_euclidiana = 0.50   # distancia euclidiana, menor o igual
-        cantidad_minima = 4
+        # Umbrales principales
+        umbral_similitud_tradicional = 0.85    # similitud coseno tradicional
+        umbral_similitud_fr = 0.60             # similitud coseno face_recognition
+        cantidad_minima = 4  # mínimo de coincidencias dobles para aceptar
 
-        candidatos = {}
+        # Umbrales estrictos para fallback
+        umbral_strict_tradicional = 0.98
+        umbral_strict_fr = 0.85
+
+        candidatos = {
+            'doble': {},
+            'tradicional': {},
+            'fr': {}
+        }
 
         for fila in resultados:
             emb_guardado = json.loads(fila[0])
-            imagen_path = fila[1]
-            usuario_id = fila[2]
-            nombre = fila[3]
-            apellido = fila[4]
-            codigo = fila[5]
-            requisitoriado = fila[6]
+            emb_guardado_fr = json.loads(fila[1]) if fila[1] else None
+            imagen_path = fila[2]
+            usuario_id = fila[3]
+            nombre = fila[4]
+            apellido = fila[5]
+            codigo = fila[6]
+            requisitoriado = fila[7]
 
-            if len(emb_guardado) != len(emb_ext):
+            # Validación de tamaños y existencia de embeddings
+            if (
+                emb_guardado is None or
+                emb_guardado_fr is None or
+                len(emb_guardado) != len(emb_ext) or
+                len(emb_guardado_fr) != len(emb_ext_fr)
+            ):
                 continue
 
-            sim_cos = similitud_coseno(emb_ext, emb_guardado)
-            dist_euc = distancia_euclidiana(emb_ext, emb_guardado)
+            # --- Similitud tradicional (coseno) ---
+            sim_trad = float(np.dot(emb_ext, emb_guardado) / (np.linalg.norm(emb_ext) * np.linalg.norm(emb_guardado)))
+            # --- Similitud face_recognition (coseno) ---
+            emb_ext_fr_n = emb_ext_fr / np.linalg.norm(emb_ext_fr)
+            emb_guardado_fr_n = np.array(emb_guardado_fr) / np.linalg.norm(emb_guardado_fr)
+            sim_fr = float(np.dot(emb_ext_fr_n, emb_guardado_fr_n))
 
-            # Puedes requerir ambas condiciones, o solo una, o guardar ambas para análisis
-            if sim_cos >= umbral_similitud and dist_euc <= umbral_euclidiana:
-                if usuario_id not in candidatos:
-                    candidatos[usuario_id] = {
+            # --- Lógica Fallback ---
+            # Caso 1: Doble coincidencia
+            if sim_trad >= umbral_similitud_tradicional and sim_fr >= umbral_similitud_fr:
+                if usuario_id not in candidatos['doble']:
+                    candidatos['doble'][usuario_id] = {
                         "nombre": nombre,
                         "apellido": apellido,
                         "codigo_unico": codigo,
                         "requisitoriado": bool(requisitoriado),
-                        "similitudes": [],
-                        "distancias": [],
+                        "similitudes_trad": [],
+                        "similitudes_fr": [],
                         "imagenes": []
                     }
-                candidatos[usuario_id]["similitudes"].append(sim_cos)
-                candidatos[usuario_id]["distancias"].append(dist_euc)
-                candidatos[usuario_id]["imagenes"].append(imagen_path)
+                candidatos['doble'][usuario_id]["similitudes_trad"].append(sim_trad)
+                candidatos['doble'][usuario_id]["similitudes_fr"].append(sim_fr)
+                candidatos['doble'][usuario_id]["imagenes"].append(imagen_path)
+            # Caso 2: Solo tradicional (umbral estricto)
+            elif sim_trad >= umbral_strict_tradicional:
+                if usuario_id not in candidatos['tradicional']:
+                    candidatos['tradicional'][usuario_id] = {
+                        "nombre": nombre,
+                        "apellido": apellido,
+                        "codigo_unico": codigo,
+                        "requisitoriado": bool(requisitoriado),
+                        "similitudes_trad": [],
+                        "imagenes": []
+                    }
+                candidatos['tradicional'][usuario_id]["similitudes_trad"].append(sim_trad)
+                candidatos['tradicional'][usuario_id]["imagenes"].append(imagen_path)
+            # Caso 3: Solo face_recognition (umbral estricto)
+            elif sim_fr >= umbral_strict_fr:
+                if usuario_id not in candidatos['fr']:
+                    candidatos['fr'][usuario_id] = {
+                        "nombre": nombre,
+                        "apellido": apellido,
+                        "codigo_unico": codigo,
+                        "requisitoriado": bool(requisitoriado),
+                        "similitudes_fr": [],
+                        "imagenes": []
+                    }
+                candidatos['fr'][usuario_id]["similitudes_fr"].append(sim_fr)
+                candidatos['fr'][usuario_id]["imagenes"].append(imagen_path)
 
-        # Buscar usuario con más coincidencias válidas
+        # Limpieza del archivo temporal
+        if os.path.exists(ruta_temporal):
+            os.remove(ruta_temporal)
+
+        # --- Selección del mejor usuario según prioridad ---
         mejor_usuario = None
-        max_similitudes = 0
+        max_coincidencias = 0
 
-        for uid, data in candidatos.items():
-            if len(data["similitudes"]) >= cantidad_minima:
-                promedio_sim = sum(data["similitudes"]) / len(data["similitudes"])
-                promedio_dist = sum(data["distancias"]) / len(data["distancias"])
-                if len(data["similitudes"]) > max_similitudes:
-                    max_similitudes = len(data["similitudes"])
+        # 1. Buscar coincidencia doble
+        for uid, data in candidatos['doble'].items():
+            if len(data["similitudes_trad"]) >= cantidad_minima:
+                promedio_trad = sum(data["similitudes_trad"]) / len(data["similitudes_trad"])
+                promedio_fr = sum(data["similitudes_fr"]) / len(data["similitudes_fr"])
+                if len(data["similitudes_trad"]) > max_coincidencias:
+                    max_coincidencias = len(data["similitudes_trad"])
                     mejor_usuario = {
                         "usuario_id": uid,
                         "nombre": data["nombre"],
                         "apellido": data["apellido"],
                         "codigo_unico": data["codigo_unico"],
-                        "similitud_promedio": round(promedio_sim, 4),
-                        "distancia_promedio": round(promedio_dist, 4),
+                        "similitud_tradicional_promedio": round(promedio_trad, 4),
+                        "similitud_face_recognition_promedio": round(promedio_fr, 4),
                         "requisitoriado": data["requisitoriado"],
-                        "imagen_referencia": data["imagenes"][0]
+                        "imagen_referencia": data["imagenes"][0],
+                        "metodo": "doble"
+                    }
+        # 2. Fallback tradicional
+        if not mejor_usuario:
+            for uid, data in candidatos['tradicional'].items():
+                promedio_trad = sum(data["similitudes_trad"]) / len(data["similitudes_trad"])
+                if len(data["similitudes_trad"]) > max_coincidencias:
+                    max_coincidencias = len(data["similitudes_trad"])
+                    mejor_usuario = {
+                        "usuario_id": uid,
+                        "nombre": data["nombre"],
+                        "apellido": data["apellido"],
+                        "codigo_unico": data["codigo_unico"],
+                        "similitud_tradicional_promedio": round(promedio_trad, 4),
+                        "requisitoriado": data["requisitoriado"],
+                        "imagen_referencia": data["imagenes"][0],
+                        "metodo": "solo_tradicional"
+                    }
+        # 3. Fallback face_recognition
+        if not mejor_usuario:
+            for uid, data in candidatos['fr'].items():
+                promedio_fr = sum(data["similitudes_fr"]) / len(data["similitudes_fr"])
+                if len(data["similitudes_fr"]) > max_coincidencias:
+                    max_coincidencias = len(data["similitudes_fr"])
+                    mejor_usuario = {
+                        "usuario_id": uid,
+                        "nombre": data["nombre"],
+                        "apellido": data["apellido"],
+                        "codigo_unico": data["codigo_unico"],
+                        "similitud_face_recognition_promedio": round(promedio_fr, 4),
+                        "requisitoriado": data["requisitoriado"],
+                        "imagen_referencia": data["imagenes"][0],
+                        "metodo": "solo_face_recognition"
                     }
 
         if mejor_usuario:
@@ -234,10 +375,13 @@ def reconocer_usuario():
 
     except Exception as e:
         print("Error en reconocimiento:", e)
+        import traceback; traceback.print_exc()
+        # Limpieza del archivo temporal en caso de error
+        if os.path.exists(ruta_temporal):
+            os.remove(ruta_temporal)
         return jsonify({"mensaje": "Error al procesar imagen"}), 500
 
-
- #Editar Usuario de datos
+#Editar Usuario de datos
 @app.route("/editar_usuario/<int:usuario_id>", methods=["PUT"])
 def editar_usuario(usuario_id):
     try:
@@ -367,8 +511,6 @@ def imagenes_usuario(usuario_id):
         print("Error en imagenes_usuario:", e)
         import traceback; traceback.print_exc()
         return jsonify({"mensaje": "Error en la operación"}), 500
-
-
 
 #Eliminar Usuario(Sus imagenes)
 @app.route("/eliminar_usuario/<int:usuario_id>", methods=["DELETE"])

@@ -1,14 +1,13 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, Button, Image, StyleSheet, ActivityIndicator, Alert } from 'react-native';
+import { View, Text, Button, Image, StyleSheet, ActivityIndicator, Alert, ScrollView } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { reconocerUsuario } from '../services/api';
 
-const HomeScreen = () => {
+const HomeScreen = ({ navigation }) => {
   const [imagen, setImagen] = useState(null);
   const [resultado, setResultado] = useState(null);
   const [cargando, setCargando] = useState(false);
 
-  // Solicitar permisos de cámara al cargar el componente
   useEffect(() => {
     (async () => {
       const { status } = await ImagePicker.requestCameraPermissionsAsync();
@@ -18,13 +17,11 @@ const HomeScreen = () => {
     })();
   }, []);
 
-  // Función para seleccionar imagen de galería
   const seleccionarImagen = async () => {
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
       quality: 1,
     });
-
     if (!result.canceled) {
       const foto = result.assets[0];
       setImagen(foto);
@@ -32,13 +29,11 @@ const HomeScreen = () => {
     }
   };
 
-  // Función para tomar una foto con la cámara
   const tomarFoto = async () => {
     const result = await ImagePicker.launchCameraAsync({
       quality: 1,
       allowsEditing: false,
     });
-
     if (!result.canceled) {
       const foto = result.assets[0];
       setImagen(foto);
@@ -46,7 +41,6 @@ const HomeScreen = () => {
     }
   };
 
-  // Función para enviar imagen al backend
   const enviarAlBackend = async (foto) => {
     try {
       setCargando(true);
@@ -61,9 +55,10 @@ const HomeScreen = () => {
   };
 
   return (
-    <View style={styles.container}>
+    <ScrollView contentContainerStyle={styles.container}>
       <Text style={styles.title}>Reconocimiento Facial</Text>
-
+      <Button title="Registrar Nuevo Usuario" onPress={() => navigation.navigate('Registro')} />
+      <View style={{ marginVertical: 10 }} />
       <Button title="Seleccionar Imagen de Galería" onPress={seleccionarImagen} />
       <View style={{ marginVertical: 10 }} />
       <Button title="Tomar Foto con Cámara" onPress={tomarFoto} />
@@ -80,28 +75,31 @@ const HomeScreen = () => {
                 Detectado: {resultado.nombre} {resultado.apellido}
               </Text>
               <Text>Código único: {resultado.codigo_unico}</Text>
-              <Text>Similitud: {resultado.similitud_promedio}</Text>
-
+              {resultado.similitud_tradicional_promedio && (
+                <Text>Similitud tradicional: {resultado.similitud_tradicional_promedio}</Text>
+              )}
+              {resultado.similitud_face_recognition_promedio && (
+                <Text>Similitud FR: {resultado.similitud_face_recognition_promedio}</Text>
+              )}
               {resultado.alerta && (
                 <Text style={styles.alerta}>
                   ⚠️ {resultado.mensaje_alerta}
                 </Text>
               )}
-
               <Image
-                source={{ uri: `http://192.168.18.175:5000/uploads/${resultado.imagen_referencia}` }}
+                source={{ uri: `http://192.168.10.107:5000/uploads/${resultado.imagen_referencia}` }}
                 style={styles.imagen}
               />
             </>
           )}
         </View>
       )}
-    </View>
+    </ScrollView>
   );
 };
 
 const styles = StyleSheet.create({
-  container: { flex: 1, alignItems: 'center', paddingTop: 40 },
+  container: { flexGrow: 1, alignItems: 'center', paddingTop: 40, backgroundColor: "#fff" },
   title: { fontSize: 22, fontWeight: 'bold', marginBottom: 20 },
   texto: { fontSize: 18, marginVertical: 10 },
   alerta: { fontSize: 16, color: 'red', marginVertical: 10 },
